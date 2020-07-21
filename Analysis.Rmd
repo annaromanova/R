@@ -1,0 +1,233 @@
+---
+title: "Analysis"
+author: "Anna Romanova"
+date: "7/4/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup,include=FALSE}
+library(cluster)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(rgdal)
+library(raster)
+library(MASS)
+library(ggthemes)
+library("factoextra")
+library(clue)
+library(sp)
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE)
+```
+
+## Preface
+
+In this report some of the unsupervised learning approaches are used to clarify missing data on The one-year (2016-2017) collection of property sales in NYC from the City of New York [1].  Preliminary cleaning and reformatting of the data includes: conversion to numeric format and replacement of undefined values with corresponding averages of those attributes or zero, adding latitude and longitude by zip code from [2], conversion to NYC map[3].
+
+
+```{r NYCpreproc,eval=FALSE}
+nycDat <- read.csv("nyc-rolling-sales.csv", header = TRUE, as.is = TRUE)
+dim(nycDat)
+names(nycDat)
+zipDat <- read.csv("us-zip-code-latitude-and-longitude.csv", header = TRUE, as.is = TRUE, sep=";")
+head(zipDat)
+names(nycDat)[12] <- "Zip"
+nycDat$Zip
+nycDat = nycDat %>% inner_join(zipDat,by="Zip")
+names(nycDat)
+```
+
+
+```{r NYCpreproc1,eval=FALSE}
+nycDatNum <- dplyr::select(nycDat, RESIDENTIAL.UNITS, COMMERCIAL.UNITS, TOTAL.UNITS, LAND.SQUARE.FEET, GROSS.SQUARE.FEET,  YEAR.BUILT, SALE.PRICE, Latitude, Longitude)
+head(nycDatNum)
+nycDatNum$GROSS.SQUARE.FEET <- as.numeric(as.character(nycDatNum$GROSS.SQUARE.FEET))
+nycDatNum$LAND.SQUARE.FEET <- as.numeric(as.character(nycDatNum$LAND.SQUARE.FEET))
+nycDatNum$SALE.PRICE <- as.numeric(as.character(nycDatNum$SALE.PRICE))
+nycDatNum$SALE.PRICE[is.na(nycDatNum$SALE.PRICE)] <- 0
+nycDatNum <- apply(nycDatNum,2,function(x){x[is.na(x)] <- mean(x,na.rm = TRUE);x})
+nycDatNum <- transform(nycDatNum, PriceSqFeet = SALE.PRICE / GROSS.SQUARE.FEET)
+nycDatNum$PriceSqFeet <- ceiling(nycDatNum$PriceSqFeet)
+nycDatNum$PriceSqFeet[is.na(nycDatNum$PriceSqFeet)] <- 0
+nycDatNum$PriceSqFeet[is.infinite(nycDatNum$PriceSqFeet)] <- 0
+nycDatNum$PriceSqFeet[nycDatNum$PriceSqFeet==""] <- 0
+sapply(nycDatNum, class)
+head(nycDatNum, n = 20)
+options(scipen=999)
+summary(nycDatNum)
+dim(nycDatNum)
+write.table(nycDatNum,"nycDatNum.txt",quote=F,sep="\t")
+```
+
+
+```{r NYCmapPrice1,eval=FALSE}
+nycDatNum1 <- read.table("nycDatNum.txt",sep="\t",header=TRUE)
+dim(nycDatNum1)
+nycDatNumPriced = subset(nycDatNum1, nycDatNum1$PriceSqFeet > 0)
+dim(nycDatNumPriced)
+write.table(nycDatNumPriced,"nnycDatNumPriced.txt",quote=F,sep="\t")
+nycDatNumToPrice = subset(nycDatNum1, nycDatNum1$PriceSqFeet == 0)
+dim(nycDatNumToPrice)
+write.table(nycDatNumToPrice,"nycDatNumToPrice.txt",quote=F,sep="\t")
+```
+
+
+```{r NYCmapPrice2,eval=FALSE}
+nycDatNumPriced <- transform(nycDatNumPriced, Decile = ntile(PriceSqFeet, 10))
+head(nycDatNumPriced)
+```
+
+```{r NYCmapPrice3,eval=FALSE}
+counties<-readOGR("./nybb_20b/nybb.shp", layer="nybb")
+coordinates(nycDatNumPriced)<-~Longitude+Latitude
+proj4string(nycDatNumPriced)<-CRS("+proj=longlat +datum=NAD83")
+nycDatNumPriced<-spTransform(nycDatNumPriced, CRS(proj4string(counties)))
+nycDatNumPriced<-data.frame(nycDatNumPriced)
+names(nycDatNumPriced)[names(nycDatNumPriced)=="Longitude"]<-"x"
+names(nycDatNumPriced)[names(nycDatNumPriced)=="Latitude"]<-"y"
+```
+
+
+```{r NYCmapPrice4,eval=FALSE,fig.width=6,fig.height=6}
+
+ggplot() +  
+    geom_polygon(data=counties, aes(x=long, y=lat, group=group), fill="grey40", 
+        colour="grey90", alpha=1) +
+    labs(x="", y="", title="Price per Square Feet") +
+    theme(axis.ticks.y = element_blank(),axis.text.y = element_blank(), 
+          axis.ticks.x = element_blank(),axis.text.x = element_blank(),
+          plot.title = element_text(lineheight=.8, face="bold", vjust=1)) + 
+    geom_point(aes(x=x, y=y, color=Decile), data=nycDatNumPriced, alpha=1, size=3, color="grey20") +
+    geom_point(aes(x=x, y=y, color=Decile), data=nycDatNumPriced, alpha=1, size=2)+
+    scale_colour_gradientn("Price per Square Feet Decile", 
+        colours=c( "#f9f3c2","#660000"))
+    coord_equal(ratio=1)
+
+```
+
+
+## Sales Price Data
+
+The data have 84548 observations from which 82410 can be located on NYC map. 49710 have price data and the other 32700 are not. Priced and not priced objects are shown on NYC counties map giving the general understanding what Decile of Price per Gross Square Feet the unknown object could be (based on the most common price level in the area).
+
+
+```{r, NYCmapPrice5,eval=FALSE,fig.width=8,fig.height=8}
+ggplot() +  
+    geom_polygon(data=counties, aes(x=long, y=lat, group=group), fill="grey90", 
+        colour="grey90", alpha=0.5) + 
+    labs(x="", y="", title="Price per Square Feet Decile") +
+    geom_point(aes(x=x, y=y, color=Decile), data=nycDatNumPriced, alpha=1, size=5) +
+    scale_colour_gradientn("Price per Square Feet Decile", 
+        colours=c( "blue","red")) +
+    coord_equal(ratio=1) +
+    theme_map() +
+    theme(plot.title = element_text(size = 30, face = "bold", hjust = 0.5)) +
+    theme(text = element_text(size=20)) +
+    theme(legend.position = c(0.0, 0.8))
+
+
+ggsave("prices.png")
+```
+
+
+```{r NYCmapPrice6,eval=FALSE}
+head(nycDatNumToPrice)
+counties<-readOGR("./nybb_20b/nybb.shp", layer="nybb")
+coordinates(nycDatNumToPrice)<-~Longitude+Latitude
+proj4string(nycDatNumToPrice)<-CRS("+proj=longlat +datum=NAD83")
+nycDatNumToPrice<-spTransform(nycDatNumToPrice, CRS(proj4string(counties)))
+nycDatNumToPrice<-data.frame(nycDatNumToPrice)
+names(nycDatNumToPrice)[names(nycDatNumToPrice)=="Longitude"]<-"x"
+names(nycDatNumToPrice)[names(nycDatNumToPrice)=="Latitude"]<-"y"
+```
+
+
+## K-means clusters
+
+Function `kmeans` performs K-means clustering on *explicitly scaled* (e.g. `kmeans(scale(x),2)`) property sales in NYC data for 10 clusters: `cluster` attribute in the output of `kmeans` indicates cluster membership by color in the plot. Variables for clustering are: RESIDENTIAL.UNITS, COMMERCIAL.UNITS, TOTAL.UNITS, LAND.SQUARE.FEET, GROSS.SQUARE.FEET, YEAR.BUILT, LONGITUDE, LATITUDE.
+
+
+```{r kmeans,eval=FALSE}
+head(nycDatNumPriced)
+names(nycDatNumPriced)
+```
+
+
+
+```{r kmeans1,eval=FALSE}
+set.seed(123)
+kmPriced.res <- kmeans(scale(nycDatNumPriced[,c(1:6, 10:11)]), 10, nstart = 25)
+nycDatNumPriced <- cbind(nycDatNumPriced, clusterAttributes = kmPriced.res$cluster)
+head(nycDatNumPriced)
+```
+
+
+```{r kmeans2,eval=FALSE}
+kmPriced.res$centers
+```
+
+
+```{r,kmeans3,eval=FALSE,fig.width=6,fig.height=6}
+fviz_cluster(kmPriced.res, nycDatNumPriced[,c(1:6, 10:11)], geom = "point")
+```
+
+
+
+```{r,kmeans4,eval=FALSE,fig.width=8,fig.height=8}
+ggplot() +  
+    geom_polygon(data=counties, aes(x=long, y=lat, group=group), fill="grey90", 
+        colour="grey90", alpha=0.5) + 
+    labs(x="", y="", title="Price per Square Feet Decile and Cluster") +
+    geom_point(aes(x=x, y=y, color=Decile, shape=clusterAttributes), data=nycDatNumPriced, alpha=1, size=5) +
+    scale_shape_identity() +
+    scale_colour_gradientn("Price per Square Feet Decile", 
+        colours=c( "blue","red")) +
+    coord_equal(ratio=1) +
+    theme_map() +
+    theme(plot.title = element_text(size = 30, face = "bold")) +
+    theme(text = element_text(size=20)) +
+    theme(legend.position = c(0.0, 0.8))
+
+
+ggsave("pricesClust.png")
+```
+
+
+The same variables are used to predict cluster for objects with unknown price: RESIDENTIAL.UNITS, COMMERCIAL.UNITS, TOTAL.UNITS, LAND.SQUARE.FEET, GROSS.SQUARE.FEET, YEAR.BUILT, LONGITUDE, LATITUDE.
+
+```{r kmeans5,eval=FALSE}
+head(nycDatNumToPrice)
+names(nycDatNumToPrice)
+```
+
+
+```{r kmeans6,eval=FALSE}
+nycDatNumToPrice.scaled = scale(nycDatNumToPrice[,c(1:6, 9:10)])
+predictedClust <- cl_predict(kmPriced.res, newdata = nycDatNumToPrice.scaled)
+nycDatNumToPrice$clusterAttributes <- predictedClust
+head(nycDatNumToPrice)
+```
+
+
+```{r,kmeans7,eval=FALSE,fig.width=8,fig.height=8}
+ggplot() +  
+    geom_polygon(data=counties, aes(x=long, y=lat, group=group), fill="grey90", 
+        colour="grey90", alpha=0.5) + 
+    labs(x="", y="", title="Predicted Cluster for Objects with Unknown Price") +
+    geom_point(aes(x=x, y=y,shape=clusterAttributes), data=nycDatNumToPrice, alpha=1, size=5,color="black") +
+    scale_shape_identity() +
+    coord_equal(ratio=1) +
+    theme_map() +
+    theme(plot.title = element_text(size = 30, face = "bold")) +
+    theme(text = element_text(size=20)) +
+    theme(legend.position = c(0.0, 0.8))
+
+
+ggsave("pricesClustPred.png")
+```
+
+
+
